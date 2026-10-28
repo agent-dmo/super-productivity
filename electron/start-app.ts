@@ -29,7 +29,7 @@ import {
   initializeProtocolHandling,
   processPendingProtocolUrls,
 } from './protocol-handler';
-import { getIsLocked, getIsQuiting, setIsLocked } from './shared-state';
+import { getIsQuiting, setIsLocked } from './shared-state';
 import { evaluateGpuStartupGuard } from './gpu-startup-guard';
 import * as fs from 'fs';
 
@@ -408,30 +408,12 @@ export const startApp = (): void => {
     }, CONFIG.IDLE_PING_INTERVAL);
     // --------END IDLE HANDLING---------
 
-    // Track whether the window had focus before suspend/lock so we only
-    // restore keyboard focus for a window that was actually in use. Checking
-    // isVisible() is not enough: a window that is open but behind other apps
-    // is visible too, and raising it steals focus from the app the user was in.
-    // Using showOrFocus() unconditionally would also surface hidden/minimized
-    // windows on every wake/unlock — a UX regression.
-    let wasFocusedBeforeSuspend = false;
-    // The window blurs as the lock screen takes over, so only record the state
-    // on the unlocked -> locked transition. Otherwise a later 'suspend' after
-    // 'lock-screen' (or the reverse) would overwrite true with false.
-    // 'resume' clears getIsLocked() on wake even while the lock screen is still
-    // up, so a lock -> resume -> suspend sequence would record again; the local
-    // flag stays set from 'lock-screen' until 'unlock-screen' and prevents that.
-    // Linux never fires 'lock-screen' and relies on getIsLocked() alone.
-    let isScreenLocked = false;
-    const rememberFocusBeforeSuspend = (): void => {
-      if (!isScreenLocked && !getIsLocked()) {
-        wasFocusedBeforeSuspend = mainWin.isFocused();
-      }
-    };
-
+    // Don't raise or focus the window on resume/unlock: it stole focus from the
+    // app the user was in (#10726, #10700). The OS restores the previous
+    // foreground window itself; the electron#20464 workaround that used to run
+    // here targets the post-reboot case and lives in showOrFocus()/ready-to-show.
     powerMonitor.on('suspend', () => {
       log('powerMonitor: System suspend detected');
-      rememberFocusBeforeSuspend();
       setIsLocked(true);
       suspendStart = Date.now();
       mainWin.webContents.send(IPC.SUSPEND);
@@ -439,8 +421,6 @@ export const startApp = (): void => {
 
     powerMonitor.on('lock-screen', () => {
       log('powerMonitor: Screen lock detected');
-      rememberFocusBeforeSuspend();
-      isScreenLocked = true;
       setIsLocked(true);
       suspendStart = Date.now();
       mainWin.webContents.send(IPC.SUSPEND);
@@ -452,23 +432,14 @@ export const startApp = (): void => {
       setIsLocked(false);
       sendIdleMsgIfOverMin(idleTime);
       mainWin.webContents.send(IPC.RESUME);
-      // Restore keyboard focus only if the window had focus before suspend (electron#20464)
-      if (wasFocusedBeforeSuspend) {
-        showOrFocus(mainWin);
-      }
     });
 
     powerMonitor.on('unlock-screen', () => {
       const idleTime = Date.now() - suspendStart;
       log(`powerMonitor: Screen unlock detected. Idle time: ${idleTime}ms`);
-      isScreenLocked = false;
       setIsLocked(false);
       sendIdleMsgIfOverMin(idleTime);
       mainWin.webContents.send(IPC.RESUME);
-      // Restore keyboard focus only if the window had focus before lock (electron#20464)
-      if (wasFocusedBeforeSuspend) {
-        showOrFocus(mainWin);
-      }
     });
   });
 
